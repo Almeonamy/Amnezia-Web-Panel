@@ -2577,10 +2577,14 @@ done < "$BW"
 
         return result
 
-    def add_client(self, protocol_type, client_name, server_host, port):
+    def add_client(self, protocol_type, client_name, server_host, port, public_port=None):
         """
         Add a new client/peer to the AWG config.
         Returns the client config as a string for the .conf file.
+
+        `public_port` is the port clients dial when it differs from the
+        listen port (instance published on another address, port forward);
+        the interface keeps listening on `port`.
         """
         container_name = self._container_name(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
@@ -2698,7 +2702,7 @@ AllowedIPs = {allowed_ips}
 PublicKey = {server_pub_key}
 PresharedKey = {psk}
 AllowedIPs = {peer_allowed_ips}
-Endpoint = {server_host}:{port}
+Endpoint = {server_host}:{public_port or port}
 PersistentKeepalive = 25
 """
 
@@ -2709,8 +2713,12 @@ PersistentKeepalive = 25
             'config': client_config,
         }
 
-    def get_client_config(self, protocol_type, client_id, server_host, port):
-        """Reconstruct client config from stored data."""
+    def get_client_config(self, protocol_type, client_id, server_host, port, public_port=None):
+        """Reconstruct client config from stored data.
+
+        `public_port` overrides the Endpoint port the same way it does in
+        add_client, so a reissued config matches the one handed out first.
+        """
         clients_table = self._get_clients_table(protocol_type)
         client = None
         for c in clients_table:
@@ -2795,7 +2803,7 @@ PersistentKeepalive = 25
 PublicKey = {server_pub_key}
 PresharedKey = {psk}
 AllowedIPs = {peer_allowed_ips}
-Endpoint = {server_host}:{port}
+Endpoint = {server_host}:{public_port or port}
 PersistentKeepalive = 25
 """
         return config

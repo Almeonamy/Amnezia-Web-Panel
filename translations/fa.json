@@ -573,5 +573,12 @@
   "stop_peer_title": "توقف",
   "start_peer_title": "فعال‌سازی",
   "ssh_cooldown_title": "SSH cooldown (ثانیه)",
-  "ssh_cooldown_hint": "تأخیر اولیه قبل از اتصال مجدد به سرور در دسترس‌نبوده. اگر سرور درست کار می‌کند، تغییر ندهید."
+  "ssh_cooldown_hint": "تأخیر اولیه قبل از اتصال مجدد به سرور در دسترس‌نبوده. اگر سرور درست کار می‌کند، تغییر ندهید.",
+  "public_endpoint_title": "نشانی عمومی",
+  "public_endpoint_for": "نشانی که کلاینت‌های {} به آن وصل می‌شوند",
+  "public_endpoint_host": "میزبان",
+  "public_endpoint_port": "درگاه",
+  "public_endpoint_port_placeholder": "درگاه نمونه",
+  "public_endpoint_hint": "خالی بگذارید تا نشانی سرور و درگاه همین نمونه استفاده شود. اگر این نمونه روی IP دیگری از همان سرور، پشت فوروارد درگاه یا با یک نام دامنه پاسخ می‌دهد، آن را پر کنید.",
+  "public_endpoint_not_applied": "ذخیره شد، اما روی سرور اعمال نشد"
 }

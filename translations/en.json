@@ -606,5 +606,12 @@
   "stop_peer_title": "Stop",
   "start_peer_title": "Enable",
   "ssh_cooldown_title": "SSH cooldown (sec)",
-  "ssh_cooldown_hint": "Initial delay before reconnecting to an unreachable server. Do not change if the server works fine."
+  "ssh_cooldown_hint": "Initial delay before reconnecting to an unreachable server. Do not change if the server works fine.",
+  "public_endpoint_title": "Public address",
+  "public_endpoint_for": "Address clients dial for {}",
+  "public_endpoint_host": "Host",
+  "public_endpoint_port": "Port",
+  "public_endpoint_port_placeholder": "instance port",
+  "public_endpoint_hint": "Leave empty to use the server address and the instance port. Fill this in when the instance answers on another IP of the same server, behind a port forward, or under a domain name.",
+  "public_endpoint_not_applied": "Saved, but not applied on the server"
 }

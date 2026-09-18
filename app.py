@@ -1175,6 +1175,50 @@ def _manager_call(manager, method, protocol, *args, **kwargs):
 AWG_PROTOCOLS = ('awg', 'awg2', 'awg3', 'awg_legacy')
 
 
+# A public host is an IP (v4, or v6 in the brackets an endpoint needs to stay
+# readable next to the port) or a DNS name. Anything else -- a scheme, a path,
+# a space, a bare IPv6 -- would be copied verbatim into client configs, where
+# it reads as a valid endpoint and simply never connects.
+PUBLIC_HOST_MAX = 253
+PUBLIC_HOST_RE = re.compile(r'^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][A-Za-z0-9._-]*)$')
+
+
+def normalize_public_host(value):
+    """Validated public host, or '' when the field is left empty."""
+    host = str(value or '').strip()
+    if not host:
+        return ''
+    if len(host) > PUBLIC_HOST_MAX or not PUBLIC_HOST_RE.match(host):
+        raise ValueError('Public host must be an IP address or a host name')
+    return host
+
+
+def normalize_public_port(value):
+    """Validated public port as a string, or '' when the field is left empty."""
+    port = str(value or '').strip()
+    if not port:
+        return ''
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError('Public port must be a number between 1 and 65535')
+    return port
+
+
+def protocol_public_endpoint(server, protocol):
+    """The address clients must dial for one protocol instance: (host, port).
+
+    Both default to what the panel itself uses -- the server address it opens
+    SSH to, and the instance's own listen port (the returned port is None then,
+    so managers keep using it). An instance can live somewhere else: a second
+    IP on the same box, a port forward, a domain name. `public_host` and
+    `public_port` on the instance record carry that, and every config and link
+    handed to a client follows them.
+    """
+    info = (server.get('protocols') or {}).get(protocol) or {}
+    host = str(info.get('public_host') or '').strip() or server.get('host', '')
+    public_port = str(info.get('public_port') or '').strip() or None
+    return host, public_port
+
+
 def join_dns(dns1, dns2):
     """Join the two DNS fields into the `a, b` form used in configs."""
     parts = [str(value).strip() for value in (dns1, dns2) if value and str(value).strip()]
@@ -1556,6 +1600,7 @@ self_service_connections = ConnectionService(
     get_protocol_manager=get_protocol_manager,
     manager_call=_manager_call,
     generate_vpn_link=generate_vpn_link,
+    protocol_public_endpoint=protocol_public_endpoint,
 )
 
 
@@ -1775,12 +1820,13 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
             for c_req in ops['create']:
                 proto_info = srv.get('protocols', {}).get(c_req['protocol'], {})
                 port = proto_info.get('port', '55424')
+                pub_host, pub_port = protocol_public_endpoint(srv, c_req['protocol'])
                 manager = get_protocol_manager(ssh, c_req['protocol'])
                 
                 if c_req['protocol'] == 'wireguard':
-                    res = await asyncio.to_thread(manager.add_client, c_req['name'], srv['host'])
+                    res = await asyncio.to_thread(manager.add_client, c_req['name'], pub_host, public_port=pub_port)
                 else:
-                    res = await asyncio.to_thread(_manager_call, manager, 'add_client', c_req['protocol'], c_req['name'], srv['host'], port)
+                    res = await asyncio.to_thread(_manager_call, manager, 'add_client', c_req['protocol'], c_req['name'], pub_host, port, public_port=pub_port)
                 
                 if res.get('client_id'):
                     new_conn = {
@@ -2166,6 +2212,12 @@ class WgEasyImportRequest(BaseModel):
 class RenameProtocolRequest(BaseModel):
     protocol: str = ''
     name: str = ''  # empty = reset to default
+
+
+class PublicEndpointRequest(BaseModel):
+    protocol: str = ''
+    public_host: str = ''  # empty = the server's own address
+    public_port: str = ''  # empty = the instance's listen port
 
 
 class AddConnectionRequest(BaseModel):
@@ -3480,6 +3532,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         install_base = protocol_base(install_protocol)
         # A reinstalled entry keeps its exit link and is re-linked below
         previous_link = None
+        # Where an instance is published is a property of the network, not
+        # of this install: reinstalling must not move clients back to the
+        # address the panel happens to manage the box through.
+        previous_record = (server.get('protocols') or {}).get(install_protocol) or {}
+        previous_public = {key: previous_record[key]
+                           for key in ('public_host', 'public_port')
+                           if previous_record.get(key)}
         # Reinstalling an instance is not the same as adding one: an instance a
         # user deliberately left unlinked must not be linked behind their back.
         reinstall = install_protocol in (server.get('protocols') or {})
@@ -3521,7 +3580,9 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 port=req.port,
                 tls_emulation=req.tls_emulation if req.tls_emulation is not None else True,
                 tls_domain=req.tls_domain,
-                max_connections=req.max_connections if req.max_connections is not None else 0
+                max_connections=req.max_connections if req.max_connections is not None else 0,
+                public_host=previous_public.get('public_host'),
+                public_port=previous_public.get('public_port'),
             )
         elif install_base == 'xray':
             install_args = ()
@@ -3620,6 +3681,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         proto_record['container_name'] = protocol_container_name(install_protocol)
         if previous_link:
             proto_record['exit_link'] = previous_link
+        proto_record.update(previous_public)
         server['protocols'][install_protocol] = proto_record
         result['protocol'] = install_protocol
         result['base_protocol'] = install_base
@@ -4471,6 +4533,67 @@ def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolReq
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/servers/{server_id}/protocol/public-endpoint', tags=["Protocols"])
+async def api_set_protocol_public_endpoint(request: Request, server_id: int, req: PublicEndpointRequest):
+    """Set or clear the address clients dial for one protocol instance.
+
+    Both fields are optional and empty means "as before": the server's own
+    address, the instance's listen port. Useful when an instance answers on a
+    second IP of the same box, behind a port forward, or under a domain name.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        proto = req.protocol.strip()
+        if proto not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+        try:
+            host = normalize_public_host(req.public_host)
+            port = normalize_public_port(req.public_port)
+        except ValueError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+
+        record = server['protocols'][proto]
+        for key, value in (('public_host', host), ('public_port', port)):
+            if value:
+                record[key] = value
+            else:
+                record.pop(key, None)
+        save_data(data)
+
+        # Telemt composes its own tg:// links from config.toml, so for that
+        # protocol the override reaches clients only after the file on the
+        # server carries it. The record is saved either way: a box that is down
+        # right now must not lose the setting, and the next install re-applies
+        # it.
+        warning = ''
+        if protocol_base(proto) == 'telemt':
+            ssh = None
+            try:
+                pub_host, pub_port = protocol_public_endpoint(server, proto)
+                ssh = await asyncio.to_thread(get_ssh, server)
+                await asyncio.to_thread(ssh.connect)
+                manager = get_protocol_manager(ssh, proto)
+                await asyncio.to_thread(
+                    manager.set_public_endpoint, pub_host, pub_port or record.get('port', '443'))
+            except Exception as e:
+                logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
+                warning = str(e)
+            finally:
+                if ssh is not None:
+                    ssh.disconnect()
+
+        return {'status': 'success', 'protocol': proto,
+                'public_host': host, 'public_port': port, 'warning': warning}
+    except Exception as e:
+        logger.exception("Error setting protocol public endpoint")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 @app.post('/api/servers/{server_id}/wgeasy/import', tags=["Protocols"])
 def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportRequest):
     """Migrate clients from a wg-easy panel on this server into a panel-managed
@@ -4671,13 +4794,14 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
         server = data['servers'][server_id]
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         port = proto_info.get('port', '55424')
+        pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         
         if protocol_base(req.protocol) == 'telemt':
             result = manager.add_client(
-                req.protocol, req.name, server['host'], port,
+                req.protocol, req.name, pub_host, pub_port or port,
                 telemt_quota=req.telemt_quota,
                 telemt_max_ips=req.telemt_max_ips,
                 telemt_expiry=req.telemt_expiry,
@@ -4686,9 +4810,9 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
                 max_tcp_conns=req.telemt_max_conns
             )
         elif protocol_base(req.protocol) == 'wireguard':
-            result = manager.add_client(req.name, server['host'])
+            result = manager.add_client(req.name, pub_host, public_port=pub_port)
         else:
-            result = manager.add_client(req.protocol, req.name, server['host'], port)
+            result = manager.add_client(req.protocol, req.name, pub_host, port, public_port=pub_port)
         ssh.disconnect()
 
         if result.get('config'):
@@ -4888,10 +5012,11 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         port = proto_info.get('port', '55424')
+        pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, server['host'], port)
+        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, req.protocol)}
     except Exception as e:
@@ -5030,13 +5155,14 @@ def api_add_user(request: Request, req: AddUserRequest):
                 server = data['servers'][req.server_id]
                 proto_info = server.get('protocols', {}).get(req.protocol, {})
                 port = proto_info.get('port', '55424')
+                pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
                 conn_name = req.connection_name or f"{req.username}_vpn"
                 ssh = get_ssh(server)
                 ssh.connect()
                 manager = get_protocol_manager(ssh, req.protocol)
                 if protocol_base(req.protocol) == 'telemt':
                     conn_result = manager.add_client(
-                        req.protocol, conn_name, server['host'], port,
+                        req.protocol, conn_name, pub_host, pub_port or port,
                         telemt_quota=req.telemt_quota,
                         telemt_max_ips=req.telemt_max_ips,
                         telemt_expiry=req.telemt_expiry,
@@ -5045,7 +5171,7 @@ def api_add_user(request: Request, req: AddUserRequest):
                         max_tcp_conns=req.telemt_max_conns
                     )
                 else:
-                    conn_result = manager.add_client(req.protocol, conn_name, server['host'], port)
+                    conn_result = manager.add_client(req.protocol, conn_name, pub_host, port, public_port=pub_port)
                 ssh.disconnect()
 
                 if conn_result.get('client_id'):
@@ -5218,6 +5344,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
                 return JSONResponse({'error': _t('peer_already_linked', lang).replace('{}', owner_name)}, status_code=400)
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         port = proto_info.get('port', '55424')
+        pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
         ssh = await asyncio.to_thread(get_ssh, server)
         await asyncio.to_thread(ssh.connect)
         manager = get_protocol_manager(ssh, req.protocol)
@@ -5226,13 +5353,13 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             # Use existing client
             target_client_id = req.client_id
             # Retrieve config for existing client
-            config = await asyncio.to_thread(_manager_call, manager, 'get_client_config', req.protocol, req.client_id, server['host'], port)
+            config = await asyncio.to_thread(_manager_call, manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
             result = {'client_id': target_client_id, 'config': config}
         else:
             # Create new client
             if protocol_base(req.protocol) == 'telemt':
                 result = await asyncio.to_thread(
-                    manager.add_client, req.protocol, req.name, server['host'], port,
+                    manager.add_client, req.protocol, req.name, pub_host, pub_port or port,
                     telemt_quota=req.telemt_quota,
                     telemt_max_ips=req.telemt_max_ips,
                     telemt_expiry=req.telemt_expiry,
@@ -5241,7 +5368,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
                     max_tcp_conns=req.telemt_max_conns
                 )
             else:
-                result = await asyncio.to_thread(manager.add_client, req.protocol, req.name, server['host'], port)
+                result = await asyncio.to_thread(manager.add_client, req.protocol, req.name, pub_host, port, public_port=pub_port)
         
         await asyncio.to_thread(ssh.disconnect)
 
@@ -5505,11 +5632,12 @@ def api_share_config(token: str, connection_id: str, request: Request):
         server = data['servers'][sid]
         proto_info = server.get('protocols', {}).get(conn['protocol'], {})
         port = proto_info.get('port', '55424')
+        pub_host, pub_port = protocol_public_endpoint(server, conn['protocol'])
         ssh = get_ssh(server)
         ssh.connect()
         # Use appropriate manager for the protocol
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], server['host'], port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port)
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, conn['protocol'])}
     except Exception as e:
@@ -5536,11 +5664,12 @@ def api_my_connection_config(request: Request, connection_id: str):
         server = data['servers'][sid]
         proto_info = server.get('protocols', {}).get(conn['protocol'], {})
         port = proto_info.get('port', '55424')
+        pub_host, pub_port = protocol_public_endpoint(server, conn['protocol'])
         ssh = get_ssh(server)
         ssh.connect()
         # Use appropriate manager for the protocol (fixes Telemt/Xray not working for users)
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], server['host'], port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port)
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, conn['protocol'])}
     except Exception as e:
