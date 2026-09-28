@@ -75,6 +75,7 @@ Configuration panel for system parameters and preferences:
     *   **Add / Edit / Delete / Reorder** server entries — drag-and-drop reorder updates `server_id` references in saved connections automatically.
     *   Every server carries a stable `uid` (assigned on add and backfilled for existing records at startup) for cross-server references that must survive reorder and delete.
     *   **Live ping indicator** next to each server name — non-blocking TCP-connect probe to the SSH port, runs on the asyncio loop in parallel for all servers.
+    *   **Public address per protocol instance**: by default a client dials the same address the panel opens SSH to. When an instance answers somewhere else — a second IP on the box, a port forward, a domain name — set its own **public address** (🌐 on the instance card) and every config, `vless://` and `tg://` link the panel issues points there instead. Telemt prints its own links, so the address is written into its `config.toml` and applied without a restart. The setting belongs to the instance, not to the install: reinstalling the protocol keeps it, and re-issuing a config for an existing client yields the new address with the same keys.
     *   **Clear server** wipes every Amnezia-related container, image and `/opt/amnezia` directory in a single sudo script — works for any current or future `amnezia-*` protocol.
     *   **Reboot** the server directly from the UI.
     *   Strictly concurrent protocol status polling — all supported protocols/services checked in parallel for immediate feedback.
@@ -292,6 +293,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 # Cheap reachability probe for monitoring
 curl -H "Authorization: Bearer $TOKEN" http://your-panel:5000/api/servers/0/ping
+
+# Publish an instance on another address (empty fields reset it to the server's own)
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"protocol":"telemt","public_host":"203.0.113.9","public_port":"443"}' \
+  http://your-panel:5000/api/servers/0/protocol/public-endpoint
 ```
 
 ### Technology Stack

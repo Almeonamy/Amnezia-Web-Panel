@@ -1084,12 +1084,39 @@ done
         self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
 
-        out, err, code = self.ssh.run_sudo_command(
-            f"docker build --no-cache --pull -t {container_name} {dockerfile_folder}",
-            timeout=300
+        # Run the build detached and poll for its exit code. On flaky links
+        # the SSH channel dies seconds into the build while the docker daemon
+        # keeps building - a synchronous wait then reports a false failure
+        # for a build that actually succeeded. Detached, the build is immune
+        # to channel/transport drops; each poll is a fresh short channel.
+        build_log = f"/tmp/docker-build-{container_name}.log"
+        code_file = f"{build_log}.code"
+        self.ssh.run_sudo_command(f"rm -f {build_log} {code_file}")
+        self.ssh.run_sudo_command(
+            f"nohup sh -c 'docker build --no-cache --pull -t {container_name} "
+            f"{dockerfile_folder} > {build_log} 2>&1; echo $? > {code_file}' "
+            f">/dev/null 2>&1 &",
+            timeout=30
         )
-        if code != 0:
-            raise RuntimeError(f"Failed to build container: {err}")
+        build_code = None
+        deadline = time.time() + 900
+        while time.time() < deadline:
+            time.sleep(5)
+            out, err, code = self.ssh.run_sudo_command(
+                f"cat {code_file} 2>/dev/null", timeout=30)
+            if code == 0 and (out or '').strip().isdigit():
+                build_code = int(out.strip())
+                break
+        if build_code is None:
+            raise RuntimeError(
+                f"Build did not finish within 900s; "
+                f"full log on the server: {build_log}")
+        if build_code != 0:
+            out, err, _ = self.ssh.run_sudo_command(
+                f"tail -c 6000 {build_log}", timeout=30)
+            detail = (out or '').strip() or (
+                f"no output; full log on the server: {build_log}")
+            raise RuntimeError(f"Failed to build container: {detail}")
         results.append("Docker image built successfully")
 
         # Step 5: Run container
@@ -2577,10 +2604,14 @@ done < "$BW"
 
         return result
 
-    def add_client(self, protocol_type, client_name, server_host, port):
+    def add_client(self, protocol_type, client_name, server_host, port, public_port=None):
         """
         Add a new client/peer to the AWG config.
         Returns the client config as a string for the .conf file.
+
+        `public_port` is the port clients dial when it differs from the
+        listen port (instance published on another address, port forward);
+        the interface keeps listening on `port`.
         """
         container_name = self._container_name(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
@@ -2698,7 +2729,7 @@ AllowedIPs = {allowed_ips}
 PublicKey = {server_pub_key}
 PresharedKey = {psk}
 AllowedIPs = {peer_allowed_ips}
-Endpoint = {server_host}:{port}
+Endpoint = {server_host}:{public_port or port}
 PersistentKeepalive = 25
 """
 
@@ -2709,8 +2740,12 @@ PersistentKeepalive = 25
             'config': client_config,
         }
 
-    def get_client_config(self, protocol_type, client_id, server_host, port):
-        """Reconstruct client config from stored data."""
+    def get_client_config(self, protocol_type, client_id, server_host, port, public_port=None):
+        """Reconstruct client config from stored data.
+
+        `public_port` overrides the Endpoint port the same way it does in
+        add_client, so a reissued config matches the one handed out first.
+        """
         clients_table = self._get_clients_table(protocol_type)
         client = None
         for c in clients_table:
@@ -2795,7 +2830,7 @@ PersistentKeepalive = 25
 PublicKey = {server_pub_key}
 PresharedKey = {psk}
 AllowedIPs = {peer_allowed_ips}
-Endpoint = {server_host}:{port}
+Endpoint = {server_host}:{public_port or port}
 PersistentKeepalive = 25
 """
         return config
