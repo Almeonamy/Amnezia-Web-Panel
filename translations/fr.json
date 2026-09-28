@@ -580,5 +580,9 @@
   "public_endpoint_port": "Port",
   "public_endpoint_port_placeholder": "port de l'instance",
   "public_endpoint_hint": "Laissez vide pour utiliser l'adresse du serveur et le port de l'instance. Renseignez ces champs si l'instance répond sur une autre IP du même serveur, derrière une redirection de port ou sous un nom de domaine.",
-  "public_endpoint_not_applied": "Enregistré, mais non appliqué sur le serveur"
+  "public_endpoint_not_applied": "Enregistré, mais non appliqué sur le serveur",
+  "peer_poll_title": "Actualisation en direct des pairs",
+  "peer_poll_hint": "Fréquence de rafraîchissement automatique de la liste des pairs. 0 = désactivé (par défaut). 5–10 suffit sur les serveurs rapides ; sur les lents, utilisez 300–600 ou laissez désactivé.",
+  "peer_poll_off": "désactivé",
+  "peer_poll_sec": "s"
 }
